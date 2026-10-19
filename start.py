@@ -1,16 +1,16 @@
+import asyncio
 import json
 import os
 import re
 import shutil
 import sys
 import threading
+import uuid
 import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from queue import Queue
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from queue import Empty, Queue
 
 from print_config_loader import load_print_job_config, get_config_path_for_file
 from print_engine import print_file
@@ -208,21 +208,160 @@ def move_job_to_done(file_path):
 
 
 # =========================
-# TELEGRAM: status based on PDFtoPrinter.exe return codes
-# (No changes to print_engine or existing print/move logic.)
+# TELEGRAM: reliable, TLS-verified status delivery
 # =========================
 
-TELEGRAM_STATUS_QUEUE = Queue()
+# Save unsent messages outside the printing directory. A network failure or
+# application restart must not permanently lose the print result.
+TELEGRAM_STATUS_QUEUE = Queue()  # Wake-up signal; files on disk are authoritative.
+PENDING_STATUS_DIR = CURRENT_DIR / "telegram_pending_status"
+
+
+def _save_pending_status(path, payload):
+    """Atomically create/update a pending notification on Windows."""
+    PENDING_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def queue_telegram_status(file_path, status, detail=""):
+    """Persist the actual print result before trying to contact Telegram."""
+    from bot_secrets import ALLOWED_CHAT_IDS
+
+    # Telegram uploads: *_chat<id>_user<id>_filename.ext
+    match = re.search(r"(?:^|_)chat(-?\d+)_user-?\d+_", Path(file_path).name)
+    if match and (not ALLOWED_CHAT_IDS or int(match.group(1)) in ALLOWED_CHAT_IDS):
+        chat_ids = [int(match.group(1))]
+    else:
+        # Local/Samba jobs are reported to explicitly allowed chats.
+        chat_ids = list(ALLOWED_CHAT_IDS)
+
+    if not chat_ids:
+        print("[TELEGRAM] No destination chat ID. Configure ALLOWED_CHAT_IDS "
+              "for local/LAN print jobs.", flush=True)
+        return
+
+    titles = {
+        "success": "✅ PDFtoPrinter.exe: THÀNH CÔNG",
+        "failed": "❌ PDFtoPrinter.exe: THẤT BẠI",
+        "exception": "❌ Tác vụ in gặp lỗi",
+    }
+    message = f"{titles[status]}\nTệp: {Path(file_path).name}"
+    if detail:
+        message += "\nChi tiết: " + str(detail)[:1500]
+
+    payload = {
+        "chat_ids": list(dict.fromkeys(chat_ids)),
+        "message": message,
+        "attempts": 0,
+        "retry_after": 0,
+    }
+    path = PENDING_STATUS_DIR / f"{time.time_ns()}_{uuid.uuid4().hex}.json"
+    _save_pending_status(path, payload)
+    TELEGRAM_STATUS_QUEUE.put(True)
+    print("[TELEGRAM] Print result saved for delivery:", path.name, flush=True)
+
+
+async def _send_status_to_chats(chat_ids, message):
+    """Use the same verified HTTPX transport as the working Telegram listener.
+
+    No ssl.CERT_NONE / verify=False override: certificate validation stays ON.
+    Return a per-chat error map so successful recipients are not retried.
+    """
+    from bot_secrets import BOT_TOKEN
+    from telegram import Bot
+
+    errors = {}
+    async with Bot(token=BOT_TOKEN) as bot:
+        for chat_id in chat_ids:
+            try:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=message,
+                    connect_timeout=10,
+                    read_timeout=10,
+                    write_timeout=10,
+                )
+                print(f"[TELEGRAM] Sent print result to chat {chat_id}", flush=True)
+            except Exception as exc:
+                # Never log a bot token even when a library embeds it in an URL.
+                safe_error = str(exc).replace(BOT_TOKEN, "<BOT_TOKEN>")
+                errors[chat_id] = f"{type(exc).__name__}: {safe_error}"
+    return errors
+
+
+def _deliver_pending_statuses():
+    """One delivery pass; failed messages remain on disk for automatic retry."""
+    PENDING_STATUS_DIR.mkdir(parents=True, exist_ok=True)
+    for path in sorted(PENDING_STATUS_DIR.glob("*.json")):
+        payload = None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if time.time() < float(payload.get("retry_after", 0)):
+                continue
+
+            chat_ids = payload["chat_ids"]
+            if not chat_ids:
+                path.unlink(missing_ok=True)
+                continue
+
+            errors = asyncio.run(_send_status_to_chats(chat_ids, payload["message"]))
+            failed_chat_ids = [chat_id for chat_id in chat_ids if chat_id in errors]
+            if not failed_chat_ids:
+                path.unlink(missing_ok=True)
+                continue
+
+            for chat_id, error in errors.items():
+                print(f"[TELEGRAM] Cannot send status to chat {chat_id}: {error}", flush=True)
+            payload["chat_ids"] = failed_chat_ids
+        except Exception as exc:
+            # Keep notification for retry rather than silently losing it.
+            error = str(exc)
+            try:
+                from bot_secrets import BOT_TOKEN
+                error = error.replace(BOT_TOKEN, "<BOT_TOKEN>")
+            except ImportError:
+                pass
+            print(f"[TELEGRAM] Status delivery postponed: "
+                  f"{type(exc).__name__}: {error}", flush=True)
+            if not isinstance(payload, dict):
+                # Malformed JSON is not actionable; leave on disk for inspection.
+                continue
+
+        payload["attempts"] = int(payload.get("attempts", 0)) + 1
+        retry_delay = min(300, 5 * (2 ** min(payload["attempts"] - 1, 6)))
+        payload["retry_after"] = time.time() + retry_delay
+        _save_pending_status(path, payload)
+        print(f"[TELEGRAM] Will retry print status in {retry_delay} seconds.", flush=True)
+
+
+def send_telegram_notifications():
+    """Background thread: retries pending results without blocking printing."""
+    while True:
+        try:
+            try:
+                TELEGRAM_STATUS_QUEUE.get(timeout=5)
+                TELEGRAM_STATUS_QUEUE.task_done()
+            except Empty:
+                pass
+            _deliver_pending_statuses()
+        except Exception:
+            print("[TELEGRAM] Status sender error; retrying in 5 seconds.", flush=True)
+            traceback.print_exc()
+            time.sleep(5)
 
 
 def start_telegram_listener():
-    # Run Telegram polling inside the same Python process as the print watcher.
-    # A separate event loop is required because python-telegram-bot is async.
+    # Telegram polling uses its own event loop in a daemon thread.
     from telegram_listener import main as telegram_main, validate_config
     validate_config()
 
     def run_listener():
-        import asyncio
         while True:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -241,60 +380,6 @@ def start_telegram_listener():
     threading.Thread(target=send_telegram_notifications,
                      name="telegram-status-sender", daemon=True).start()
 
-
-def send_telegram_notifications():
-    # Telegram HTTP operations never hold up the printer's file/move loop.
-    while True:
-        file_path, status, detail = TELEGRAM_STATUS_QUEUE.get()
-        try:
-            notify_telegram(file_path, status, detail)
-        except Exception as exc:
-            print(f"[TELEGRAM] Status notification failed: {type(exc).__name__}: {exc}")
-        finally:
-            TELEGRAM_STATUS_QUEUE.task_done()
-
-
-def notify_telegram(file_path, status, detail=""):
-    # Use stdlib HTTP and reuse the existing bot credentials; no new dependency.
-    # A network/API error MUST NOT stop printing.
-    from bot_secrets import BOT_TOKEN, ALLOWED_CHAT_IDS
-
-    # Telegram uploads are named *_chat<id>_user<id>_... by the listener.
-    # Reply to that chat. Files arriving via LAN go to configured allowed chats.
-    match = re.search(r"(?:^|_)chat(-?\d+)_user-?\d+_", Path(file_path).name)
-    if match and (not ALLOWED_CHAT_IDS or int(match.group(1)) in ALLOWED_CHAT_IDS):
-        chat_ids = [int(match.group(1))]
-    else:
-        chat_ids = list(ALLOWED_CHAT_IDS)
-
-    if not chat_ids:
-        print("[TELEGRAM] No destination chat ID. Set ALLOWED_CHAT_IDS in bot_secrets.py "
-              "to receive status for files added locally/LAN.")
-        return
-
-    name = Path(file_path).name
-    messages = {
-        "success": "✅ PDFtoPrinter.exe: THÀNH CÔNG",
-        "failed": "❌ PDFtoPrinter.exe: THẤT BẠI",
-        "exception": "❌ Tác vụ in gặp lỗi",
-    }
-    message = f"{messages[status]}\nTệp: {name}"
-    if detail:
-        message += "\nChi tiết: " + str(detail)[:1500]
-
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    for chat_id in dict.fromkeys(chat_ids):
-        try:
-            request = Request(
-                url,
-                data=urlencode({"chat_id": chat_id, "text": message}).encode("utf-8"),
-                method="POST",
-            )
-            with urlopen(request, timeout=8) as response:
-                response.read()
-        except Exception as exc:
-            print(f"[TELEGRAM] Cannot send status to chat {chat_id}: "
-                  f"{type(exc).__name__}: {exc}")
 
 # =========================
 # MAIN LOOP
@@ -390,7 +475,7 @@ def main():
                     job_key = (str(latest_file), latest_file.stat().st_mtime_ns)
                     if notified.get(job_key) != status:
                         detail = "" if success else f"Return codes: {codes}"
-                        TELEGRAM_STATUS_QUEUE.put((latest_file, status, detail))
+                        queue_telegram_status(latest_file, status, detail)
                         notified[job_key] = status
                         if len(notified) > 256:
                             notified.pop(next(iter(notified)))
@@ -421,9 +506,9 @@ def main():
                 try:
                     job_key = (str(latest_file), latest_file.stat().st_mtime_ns)
                     if notified.get(job_key) != "exception":
-                        TELEGRAM_STATUS_QUEUE.put((
+                        queue_telegram_status(
                             latest_file, "exception", f"{type(e).__name__}: {e}"
-                        ))
+                        )
                         notified[job_key] = "exception"
                         if len(notified) > 256:
                             notified.pop(next(iter(notified)))

@@ -1,0 +1,56 @@
+BAN VA LOI KHONG GUI DUOC KET QUA IN VE TELEGRAM
+=================================================
+
+NGUYEN NHAN
+- PDFtoPrinter.exe in xong, returncode = 0: khong phai loi may in.
+- start.py cu gui sendMessage bang urllib va bi SSL CERTIFICATE_VERIFY_FAILED.
+- Nhan tin Telegram (getUpdates) van HTTP 200 vi dung thu vien python-telegram-bot.
+
+DA SUA
+1. start.py: gui trang thai bang python-telegram-bot (su dung HTTPX, xac thuc SSL).
+2. Luu ket qua in vao thu muc "telegram_pending_status" truoc khi gui.
+3. Neu mang/Telegram loi: gui lai tu dong sau 5, 10, 20, 40... toi da 300 giay.
+4. Khoi dong lai chuong trinh khong lam mat cac ket qua dang cho gui.
+5. Neu co nhieu chat, chi gui lai cho chat chua nhan duoc thong bao.
+6. telegram_listener.py: tat log INFO HTTPX co chua BOT_TOKEN trong URL.
+7. Khong thay doi print_engine.py, cach in, giay, may in hay bo cuc tem.
+8. KHONG vo hieu hoa xac minh chung chi SSL.
+
+CACH CAP NHAT TREN WINDOWS
+1. Dung cua so run_all.bat cu (Ctrl+C, hoac dong cua so).
+2. Sao luu 2 file cu: C:\chrome-auto-print\start.py va
+   C:\chrome-auto-print\telegram_listener.py.
+3. Giai nen goi BAN_VA va chep de 2 file start.py va
+   telegram_listener.py vao C:\chrome-auto-print\.
+4. GIU NGUYEN bot_secrets.py, print_engine.py, print_config_loader.py,
+   tools\PDFtoPrinter.exe, printing\print_settings.config, dev_profile.
+5. Chay lai C:\chrome-auto-print\run_all.bat.
+   Neu bao thieu module telegram: chay install_requirements.bat truoc.
+6. Gui mot file test vao bot; kiem tra:
+   [TELEGRAM] Print result saved for delivery: ...
+   [TELEGRAM] Sent print result to chat <id>
+   Bot phan hoi: "PDFtoPrinter.exe: THANH CONG".
+
+KHI MAT MANG
+- Cac file *.json trong "telegram_pending_status" la thong bao chua gui.
+- Chung se tu dong duoc gui lai khi mang hoat dong.
+- Khong xoa thu muc nay neu con thong bao muon nhan.
+- Neu phan mem bi buoc dong ngay sau khi Telegram nhan thong bao
+  nhung truoc khi xoa JSON, co the nhan trung thong bao sau khi mo lai.
+
+NEU VAN GAP LOI SSL
+- Kiem tra gio Windows va proxy/antivirus chan SSL (HTTPS inspection).
+- Bao dam may tin cay chung chi goc hop le cua proxy noi bo neu co.
+- Khong su dung verify=False / bo qua chung chi, vi de lo bot token.
+- Neu log "getUpdates" chay nhung gui bao loi, kiem tra firewall/proxy
+  cho phep Telegram Bot API sendMessage.
+
+BAO MAT
+- Token bot nam trong file bot_secrets.py CUA BAN, khong duoc chep vao goi va.
+- Anh log cu co hien duong dan Telegram kem token. Neu da chia se anh hoac
+  file ZIP ra ngoai, nen thu hoi token cu trong @BotFather (/revoke),
+  cap nhat token moi vao bot_secrets.py va khoi dong lai.
+
+Luu y: Ban va da duoc kiem tra cu phap va thu nghiem mo phong luong gui
+thanh cong, mat mang, gui mot phan va thu lai. Chua thu tren may in va
+ket noi Telegram thuc te cua ban.

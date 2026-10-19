@@ -89,6 +89,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+# HTTPX INFO logs include /bot<TOKEN>/getUpdates URLs. Do not expose tokens.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 log = logging.getLogger("telegram_listener")
 
 
