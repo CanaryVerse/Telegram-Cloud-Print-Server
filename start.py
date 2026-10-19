@@ -45,7 +45,7 @@ def find_chrome_exe():
     if found:
         return found
 
-    # Không raise ở đây để PDF gốc vẫn có thể in thẳng bằng PDFtoPrinter.
+    # Do not raise here so the original PDF can still be printed directly with PDFtoPrinter.
     return ""
 
 
@@ -61,8 +61,8 @@ ENGINE_CONFIG = {
 }
 
 
-# Toàn bộ default config đặt ở đây.
-# File printing/print_settings.config nếu có sẽ override từng phần.
+# All default configuration values are defined here.
+# If present, printing/print_settings.config overrides individual settings.
 DEFAULT_JOB_CONFIG = {
     "printer_name": "HPRT N41",
     "pdftoprinter_exe": str(CURRENT_DIR / "tools" / "PDFtoPrinter.exe"),
@@ -70,21 +70,21 @@ DEFAULT_JOB_CONFIG = {
     "image_render_wait_sec": 0.3,
     "local_html_render_wait_sec": 0.5,
     "text_render_wait_sec": 0.2,
-    # Khổ tem. Nếu paper_size_text là "76mm * 130mm" thì code cũng tự parse ra mm.
+    # Label size. The code also parses millimeters from paper_size_text such as "76mm * 130mm".
     "paper_size_text": "76mm * 130mm",
     "paper_width_mm": 76,
     "paper_height_mm": 130,
 
-    # Với PDFtoPrinter, page range không chắc được hỗ trợ khi in PDF gốc.
-    # Với HTML/link/ảnh/text render qua Chrome, print_pages có tác dụng khi tạo PDF tạm.
+    # PDFtoPrinter may not support page ranges for original PDF files.
+    # For HTML, links, images and text rendered by Chrome, print_pages applies when generating a temporary PDF.
     "print_pages": "All",
     "copies": 1,
 
-    # True: PDF gốc gửi thẳng PDFtoPrinter, không render lại bằng Chrome.
+    # True: send the original PDF directly to PDFtoPrinter without rendering it again in Chrome.
     "direct_print_pdf": True,
     "render_pdf_files_with_chrome": False,
 
-    # Chrome Page.printToPDF cho link/html/ảnh/text.
+    # Use Chrome Page.printToPDF for links, HTML, images and text.
     "chrome_start_timeout_sec": 15,
     "page_load_timeout_sec": 25,
     "web_render_wait_sec": 3,
@@ -99,8 +99,8 @@ DEFAULT_JOB_CONFIG = {
     "margin_right_mm": 0,
     "image_fit": "contain",
 
-    # Fit/scale PDF trước khi gửi PDFtoPrinter để tránh crop.
-    # pdf_fit_scale < 1.0 giúp chừa an toàn cho máy in nhiệt có vùng chết ở mép.
+    # Fit or scale the PDF before sending it to PDFtoPrinter to prevent cropping.
+    # pdf_fit_scale below 1.0 adds a safety margin for thermal printers with unprintable edges.
     "normalize_pdf_before_print": True,
     "pdf_fit_margin_mm": 1.5,
     "pdf_fit_scale": 0.96,
@@ -111,7 +111,7 @@ DEFAULT_JOB_CONFIG = {
     "pdftoprinter_timeout_sec": 60,
     "fail_on_pdftoprinter_nonzero": True,
 
-    # Debug file PDF tạm.
+    # Debug temporary PDF files.
     "keep_temp_pdf": True,
     "cleanup_temp_pdf_after_success": False,
 }
@@ -247,13 +247,13 @@ def queue_telegram_status(file_path, status, detail=""):
         return
 
     titles = {
-        "success": "✅ PDFtoPrinter.exe: THÀNH CÔNG",
-        "failed": "❌ PDFtoPrinter.exe: THẤT BẠI",
-        "exception": "❌ Tác vụ in gặp lỗi",
+        "success": "✅ PDFtoPrinter.exe: SUCCESS",
+        "failed": "❌ PDFtoPrinter.exe: FAILED",
+        "exception": "❌ Print job encountered an error",
     }
-    message = f"{titles[status]}\nTệp: {Path(file_path).name}"
+    message = f"{titles[status]}\nFile: {Path(file_path).name}"
     if detail:
-        message += "\nChi tiết: " + str(detail)[:1500]
+        message += "\nDetails: " + str(detail)[:1500]
 
     payload = {
         "chat_ids": list(dict.fromkeys(chat_ids)),

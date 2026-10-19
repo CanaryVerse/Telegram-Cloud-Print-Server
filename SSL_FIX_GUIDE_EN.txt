@@ -1,0 +1,12 @@
+TELEGRAM CLOUD PRINT - ENGLISH SSL PATCH
+
+1. Stop run_all.bat.
+2. Back up start.py and telegram_listener.py in C:\chrome-auto-print.
+3. Copy the two Python files from this archive into C:\chrome-auto-print.
+4. Keep your existing bot_secrets.py, printer settings and other files.
+5. Restart run_all.bat and send a test print job.
+
+The printing and retry logic is unchanged from the SSL-fixed patch.
+Only Vietnamese comments and user-facing print-status messages were translated.
+Success: PDFtoPrinter.exe: SUCCESS
+Failure: PDFtoPrinter.exe: FAILED
