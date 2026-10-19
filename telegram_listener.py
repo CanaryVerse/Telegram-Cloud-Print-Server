@@ -281,39 +281,6 @@ async def reply_if_enabled(update: Update, text: str) -> None:
     if REPLY_AFTER_SAVE and update.effective_message:
         await update.effective_message.reply_text(text)
 
-async def reply_print_status_later(msg, final_path: Path):
-    max_attempts = 4
-    wait_sec = 15
-
-    try:
-        for attempt in range(1, max_attempts + 1):
-            await asyncio.sleep(wait_sec)
-
-            # Nếu file đã rời khỏi thư mục printing => coi như đã xử lý xong
-            if not final_path.exists():
-                await msg.reply_text(
-                    "✅ Printing is probably complete.\n"
-                    f"The file has left the 'printing' folder:\n{final_path.name}"
-                )
-                return
-
-            log.info(
-                "Print status check %s/%s: file still exists: %s",
-                attempt,
-                max_attempts,
-                final_path,
-            )
-
-        # Sau 4 lần, mỗi lần cách nhau 15 giây, file vẫn còn
-        await msg.reply_text(
-            "❌ Printing may have failed.\n"
-            f"After {max_attempts} checks, the file is still in the 'printing' folder:\n"
-            f"{final_path.name}\n\n"
-            "Please check the print server, printer, or start.py."
-        )
-
-    except Exception as e:
-        log.warning("reply_print_status_later error for %s: %s", final_path, e)
 # =============================================================================
 # HANDLERS
 # =============================================================================
@@ -365,7 +332,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply += f"\nSaved caption:\n{caption_path.name}"
 
     await reply_if_enabled(update, reply)
-    context.application.create_task(reply_print_status_later(msg, final_path))
 
 
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -395,7 +361,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reply += f"\nSaved caption:\n{caption_path.name}"
 
     await reply_if_enabled(update, reply)
-    context.application.create_task(reply_print_status_later(msg, final_path))
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -417,7 +382,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         log.info("Saved URL shortcut: %s -> %s", url, final_path)
         await reply_if_enabled(update, f"Saved link:\n{final_path.name}")
-        context.application.create_task(reply_print_status_later(msg, final_path))
         return
 
     # Normal text or an HTML URL that cannot be downloaded: save as .txt
@@ -428,7 +392,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     log.info("Saved text: %s", final_path)
 
     await reply_if_enabled(update, f"Saved text:\n{final_path.name}")
-    context.application.create_task(reply_print_status_later(msg, final_path))
 
 
 async def handle_other_attachment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -474,7 +437,6 @@ async def handle_other_attachment(update: Update, context: ContextTypes.DEFAULT_
         reply += f"\nSaved caption:\n{caption_path.name}"
 
     await reply_if_enabled(update, reply)
-    context.application.create_task(reply_print_status_later(msg, final_path))
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -498,7 +460,7 @@ def validate_config() -> None:
             raise SystemExit("Each item in ALLOWED_CHAT_IDS must be an int, for example: [123456789].")
 
 
-def main() -> None:
+def main(background=False) -> None:
     validate_config()
     ensure_print_dir()
 
@@ -527,7 +489,10 @@ def main() -> None:
     app.add_error_handler(error_handler)
 
     log.info("Telegram listener started. Press Ctrl+C to stop.")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    # Signal handlers only work on the main thread. The print server runs
+    # this polling loop in a daemon thread with its own asyncio event loop.
+    polling_options = {"stop_signals": None} if background else {}
+    app.run_polling(allowed_updates=Update.ALL_TYPES, **polling_options)
 
 
 if __name__ == "__main__":

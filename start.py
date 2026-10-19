@@ -1,9 +1,16 @@
 import json
 import os
+import re
 import shutil
+import sys
+import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
+from queue import Queue
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from print_config_loader import load_print_job_config, get_config_path_for_file
 from print_engine import print_file
@@ -201,6 +208,95 @@ def move_job_to_done(file_path):
 
 
 # =========================
+# TELEGRAM: status based on PDFtoPrinter.exe return codes
+# (No changes to print_engine or existing print/move logic.)
+# =========================
+
+TELEGRAM_STATUS_QUEUE = Queue()
+
+
+def start_telegram_listener():
+    # Run Telegram polling inside the same Python process as the print watcher.
+    # A separate event loop is required because python-telegram-bot is async.
+    from telegram_listener import main as telegram_main, validate_config
+    validate_config()
+
+    def run_listener():
+        import asyncio
+        while True:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                telegram_main(background=True)
+            except Exception:
+                print("[TELEGRAM] Listener crashed; restarting in 10 seconds.", flush=True)
+                traceback.print_exc()
+            finally:
+                if not loop.is_closed():
+                    loop.close()
+                asyncio.set_event_loop(None)
+            time.sleep(10)
+
+    threading.Thread(target=run_listener, name="telegram-listener", daemon=True).start()
+    threading.Thread(target=send_telegram_notifications,
+                     name="telegram-status-sender", daemon=True).start()
+
+
+def send_telegram_notifications():
+    # Telegram HTTP operations never hold up the printer's file/move loop.
+    while True:
+        file_path, status, detail = TELEGRAM_STATUS_QUEUE.get()
+        try:
+            notify_telegram(file_path, status, detail)
+        except Exception as exc:
+            print(f"[TELEGRAM] Status notification failed: {type(exc).__name__}: {exc}")
+        finally:
+            TELEGRAM_STATUS_QUEUE.task_done()
+
+
+def notify_telegram(file_path, status, detail=""):
+    # Use stdlib HTTP and reuse the existing bot credentials; no new dependency.
+    # A network/API error MUST NOT stop printing.
+    from bot_secrets import BOT_TOKEN, ALLOWED_CHAT_IDS
+
+    # Telegram uploads are named *_chat<id>_user<id>_... by the listener.
+    # Reply to that chat. Files arriving via LAN go to configured allowed chats.
+    match = re.search(r"(?:^|_)chat(-?\d+)_user-?\d+_", Path(file_path).name)
+    if match and (not ALLOWED_CHAT_IDS or int(match.group(1)) in ALLOWED_CHAT_IDS):
+        chat_ids = [int(match.group(1))]
+    else:
+        chat_ids = list(ALLOWED_CHAT_IDS)
+
+    if not chat_ids:
+        print("[TELEGRAM] No destination chat ID. Set ALLOWED_CHAT_IDS in bot_secrets.py "
+              "to receive status for files added locally/LAN.")
+        return
+
+    name = Path(file_path).name
+    messages = {
+        "success": "✅ PDFtoPrinter.exe: THÀNH CÔNG",
+        "failed": "❌ PDFtoPrinter.exe: THẤT BẠI",
+        "exception": "❌ Tác vụ in gặp lỗi",
+    }
+    message = f"{messages[status]}\nTệp: {name}"
+    if detail:
+        message += "\nChi tiết: " + str(detail)[:1500]
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    for chat_id in dict.fromkeys(chat_ids):
+        try:
+            request = Request(
+                url,
+                data=urlencode({"chat_id": chat_id, "text": message}).encode("utf-8"),
+                method="POST",
+            )
+            with urlopen(request, timeout=8) as response:
+                response.read()
+        except Exception as exc:
+            print(f"[TELEGRAM] Cannot send status to chat {chat_id}: "
+                  f"{type(exc).__name__}: {exc}")
+
+# =========================
 # MAIN LOOP
 # =========================
 
@@ -208,6 +304,13 @@ def move_job_to_done(file_path):
 def main():
     PRINT_FOLDER.mkdir(parents=True, exist_ok=True)
     DONE_FOLDER.mkdir(parents=True, exist_ok=True)
+
+    if "--telegram" in sys.argv[1:]:
+        start_telegram_listener()
+
+    # Prevent repeated Telegram alerts while the same failed job is retried
+    # (the original retry/move behavior is left unchanged).
+    notified = {}
 
     print("=" * 80)
     print("AUTO PRINT STARTER - PDFtoPrinter BACKEND")
@@ -234,6 +337,8 @@ def main():
     print("=" * 80)
 
     while True:
+        latest_file = None
+        print_engine_returned = False
         try:
             latest_file = get_latest_print_file(PRINT_FOLDER)
 
@@ -267,9 +372,30 @@ def main():
                 job_config=job_config,
                 engine_config=ENGINE_CONFIG,
             )
+            print_engine_returned = True
 
             print("Print result:")
             print(json.dumps(result, indent=2, ensure_ascii=False))
+
+            if "--telegram" in sys.argv[1:]:
+                try:
+                    # The exit code is decisive, including when the existing
+                    # fail_on_pdftoprinter_nonzero config is False.
+                    runs = result.get("print_info", {}).get("runs", [])
+                    codes = [run.get("returncode") for run in runs]
+                    success = bool(result.get("printed")) and bool(codes) and all(
+                        code == 0 for code in codes
+                    )
+                    status = "success" if success else "failed"
+                    job_key = (str(latest_file), latest_file.stat().st_mtime_ns)
+                    if notified.get(job_key) != status:
+                        detail = "" if success else f"Return codes: {codes}"
+                        TELEGRAM_STATUS_QUEUE.put((latest_file, status, detail))
+                        notified[job_key] = status
+                        if len(notified) > 256:
+                            notified.pop(next(iter(notified)))
+                except Exception as notify_error:
+                    print("[TELEGRAM] Status notification error:", notify_error)
 
             if result.get("printed"):
                 moved = move_job_to_done(latest_file)
@@ -290,6 +416,19 @@ def main():
             print("[ERROR]")
             print(e)
             print("File will NOT be moved to Done Jobs.")
+            if (latest_file is not None and not print_engine_returned
+                    and "--telegram" in sys.argv[1:]):
+                try:
+                    job_key = (str(latest_file), latest_file.stat().st_mtime_ns)
+                    if notified.get(job_key) != "exception":
+                        TELEGRAM_STATUS_QUEUE.put((
+                            latest_file, "exception", f"{type(e).__name__}: {e}"
+                        ))
+                        notified[job_key] = "exception"
+                        if len(notified) > 256:
+                            notified.pop(next(iter(notified)))
+                except Exception as notify_error:
+                    print("[TELEGRAM] Status notification error:", notify_error)
             time.sleep(POLL_INTERVAL_SEC)
 
 

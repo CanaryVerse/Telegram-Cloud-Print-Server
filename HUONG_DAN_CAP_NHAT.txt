@@ -1,0 +1,35 @@
+CAP NHAT TOI THIEU - TELEGRAM PRINT STATUS + BAT RESTART
+=========================================================
+1. Sao luu 4 file cu: start.py, telegram_listener.py, run_all.bat,
+   run_start_only.bat.
+2. Chep de 4 file trong goi nay vao thu muc du an hien tai,
+   vi du C:\chrome-auto-print.
+3. GIU NGUYEN bot_secrets.py, print_engine.py, print_config_loader.py,
+   printing/print_settings.config, dev_profile, tools/PDFtoPrinter.exe.
+4. Chay run_all.bat. Chi mot cua so, mot Python process (Telegram polling
+   chay trong mot thread ben trong start.py).
+5. Neu chi muon in ma khong ket noi Telegram: run_start_only.bat.
+
+THONG BAO
+- File nhan tu Telegram: ket qua duoc gui ve chat da gui file.
+- File chep truc tiep/Samba: ket qua gui toi ALLOWED_CHAT_IDS trong
+  bot_secrets.py. Neu danh sach rong thi khong co dia chi Telegram nao
+  de thong bao cho cac file nay.
+- Thanh cong = tat ca returncode cua PDFtoPrinter.exe bang 0.
+- That bai = nonzero returncode (ke ca khi config cho phep nonzero),
+  hoac exception/timeout truoc/trong qua trinh in.
+- Thong bao loi cho mot file KHONG lap lai moi giay khi file cu chua
+  duoc di chuyen va code cu dang tu thu in lai.
+- Loi gui Telegram/mat mang khong lam ngung in, nhung thong bao bi
+  loi khi mat mang KHONG duoc luu de gui lai. Internet can hoat dong
+  khi gui ket qua.
+
+TU DONG KHOI DONG LAI
+- run_all.bat va run_start_only.bat tu khoi dong lai khi Python process
+  THOAT VOI MA LOI (nonzero), sau 5 giay.
+- Telegram polling thread tu khoi dong lai khi bi crash, sau 10 giay.
+- Loi duoc catch trong while loop start.py khong lam chuong trinh thoat;
+  chuong trinh tiep tuc retry nhu logic cu. BAT khong can khoi dong lai.
+- Dung: Ctrl+C de thoat binh thuong hoac dong cua so .bat.
+
+Khong thay doi bat ky ham nao trong print_engine.py.
